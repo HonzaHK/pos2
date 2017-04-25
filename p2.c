@@ -1,5 +1,10 @@
 //FIT VUTBR - POS - project 2
 //JAN KUBIS / xkubis13
+
+//PLEASE READ--------------------------------------
+// !!!! i accept 512 symbols + \n as the 513th !!!!
+//-------------------------------------------------
+
 #define _POSIX_C_SOURCE 199506L
 //#define _REENTRANT //gcc yells redefinition
 
@@ -13,7 +18,7 @@
 #include <signal.h>
 #include <pthread.h>
 
-#define BUF_SIZE 512
+#define BUF_SIZE 513
 #define TOK_BUF_SIZE 1024
 #define TOKEN_CNT 64
 #define CMD_CNT 64
@@ -76,9 +81,7 @@ void cl_tokenize(char *buffer, char *tokenBuffer, char** tokens){
 }
 
 
-void sigintHandler(){
-
-}
+void sigintHandler(){}
 
 void sigchldHandler(){
 	
@@ -86,7 +89,7 @@ void sigchldHandler(){
     int   status;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) //formerly !=-1
     {
-    	printf("# process %d done (parent %d)\n",pid, getpid());
+    	printf("# bg process %d done (parent %d)\n",pid, getpid());
         //unregister_child(pid, status);
     }
 }
@@ -216,19 +219,28 @@ void *thr_read_func(){
 		while(csData.isExec){
 			pthread_cond_wait(&csLock.cond,&csLock.mutex);
 		}
-		csData.isExec = true; //if not exit, then 100% execution
 		//init buffer -----------------------------------
 		for(unsigned int i=0; i<BUF_SIZE; i++){ 
 			csData.buffer[i] = '\0';
 		}
 		//-----------------------------------------------
-		printf("$ "); //prompt
-		fflush(stdout);
-		read(0, csData.buffer, sizeof(csData.buffer));
-		if(csData.buffer[0]=='\0'){ csData.isExit=true;}
-		csData.buffer[strlen(csData.buffer)-1] = '\0'; //remove last char (newline)
-		if(strcmp(csData.buffer,"exit")==0){csData.isExit = true;}
-		
+		printf("$ ");fflush(stdout);
+		int len = read(fileno(stdin), csData.buffer,BUF_SIZE);
+
+		bool properlyTerminated = (csData.buffer[BUF_SIZE-1]=='\n'||csData.buffer[BUF_SIZE-1]=='\0') ? true : false;
+		if(len<=BUF_SIZE && properlyTerminated){ //512+enter => 513
+			csData.isExec = true;
+			if(csData.buffer[0]=='\0'){ csData.isExit=true;}
+			csData.buffer[strlen(csData.buffer)-1] = '\0'; //remove last char (newline)
+			if(strcmp(csData.buffer,"exit")==0){csData.isExit = true;}
+		}
+		else{
+			csData.isExec = false;
+			printf("#ERR_INPUTLEN\n");fflush(stdout);
+			//read-out the overflow in stdin
+			char c;
+			while ((c = getchar()) != '\n' && c != EOF);
+		}
 
 		pthread_cond_broadcast(&csLock.cond);
 		pthread_mutex_unlock(&csLock.mutex);
@@ -246,7 +258,7 @@ int main(){
 	sigaction(SIGCHLD, &sa_chld, NULL);
 	
 	memset(&sa_int, 0, sizeof(sa_int));
-	sa_int.sa_handler = SIG_IGN;
+	sa_int.sa_handler = sigintHandler;
 	sigaction(SIGINT, &sa_int, NULL);
 
 	pthread_mutex_init(&csLock.mutex,NULL);
