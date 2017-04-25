@@ -18,6 +18,8 @@
 #define TOKEN_CNT 64
 #define CMD_CNT 64
 
+struct sigaction sa_int;
+
 typedef struct { //critical section lock
     pthread_cond_t cond;
     pthread_mutex_t mutex;
@@ -27,7 +29,7 @@ cs_lock_t csLock;
 typedef struct { //critical section data
     char buffer[BUF_SIZE+1];
     bool isExec;
-    bool isExit;
+    volatile bool isExit;
 } cs_data_t;
 cs_data_t csData;
 
@@ -71,25 +73,42 @@ void cl_tokenize(char *buffer, char *tokenBuffer, char** tokens){
 
 	}
 
-	// for(int i= 0; i<TOK_BUF_SIZE;i++){
-	// 	char c = tokenBuffer[i]==NULL ? '.' : tokenBuffer[i];
-	// 	printf("%c", c);
-	// }
-	// printf("\n");
-	// for(int i= 0; i<TOKEN_CNT && tokens[i]!=NULL;i++){
-	// 	printf("%s\n", tokens[i]);
-	// }
+}
+
+
+void sigintHandler(){
+
+}
+
+void sigchldHandler(){
+	
+    pid_t pid;
+    int   status;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) //formerly !=-1
+    {
+    	printf("# process %d done (parent %d)\n",pid, getpid());
+        //unregister_child(pid, status);
+    }
 }
 
 void clexec(char **cmd, clredir_t inFile, clredir_t outFile, bool isBg){
-	pid_t pid;
+	
+	if(isBg){
+		sa_int.sa_handler = SIG_IGN;
+		sigaction(SIGINT, &sa_int, NULL);
+	}
+	else{
+		sa_int.sa_handler = sigintHandler;
+		sigaction(SIGINT, &sa_int, NULL);
+	}
 
+	pid_t pid;
 	if ((pid = fork()) < 0) {
 		printf("fork error\n");
 		exit(1);
 	}
 	else if (pid == 0) { //child
-		//printf("# child pid is %d\n", getpid());
+		// printf("# child pid is %d\n", getpid());
 		// int stdinCopy = dup(0);
 		// int stdoutCopy = dup(1);
 		if(inFile.used){
@@ -104,7 +123,6 @@ void clexec(char **cmd, clredir_t inFile, clredir_t outFile, bool isBg){
 			if (dup2(outFile.filePtr,fileno(stdout))<0) { printf("outDup error");return ;}
 			close(outFile.filePtr);
 		}
-
 		if (execvp(cmd[0], cmd) < 0) {
 			printf("# ERR_EXECVP\n");
 		}
@@ -113,8 +131,9 @@ void clexec(char **cmd, clredir_t inFile, clredir_t outFile, bool isBg){
 	else { //parrent
 		int status;
 		//printf("# parent pid is %d\n", getpid());
+		//setpgid(pid,pid);
 		if(isBg){
-			//setpgid(0,0);
+
 		}
 		else{
 			waitpid(pid,&status,0);
@@ -122,50 +141,6 @@ void clexec(char **cmd, clredir_t inFile, clredir_t outFile, bool isBg){
 	}
 
 	return;
-}
-
-void sigchldHandler(){
-	
-    pid_t pid;
-    int   status;
-
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) //formerly !=-1
-    {
-    	printf("# process %d terminated by %d\n",pid, getpid());
-        //unregister_child(pid, status);
-    }
-}
-
-void *thr_read_func(){
-	while(true){
-		pthread_mutex_lock(&csLock.mutex);
-		while(csData.isExec){
-			pthread_cond_wait(&csLock.cond,&csLock.mutex);
-		}
-		//init buffer -----------------------------------
-		for(unsigned int i=0; i<BUF_SIZE; i++){ 
-			csData.buffer[i] = '\0';
-		}
-		//-----------------------------------------------
-		printf("$ "); //prompt
-		fflush(stdout);
-		read(0, csData.buffer, sizeof(csData.buffer));
-		csData.buffer[strlen(csData.buffer)-1] = '\0'; //remove last char (newline)
-		if(strcmp(csData.buffer,"exit")==0){
-			csData.isExec = true;
-			csData.isExit = true;
-			pthread_cond_broadcast(&csLock.cond);
-			pthread_mutex_unlock(&csLock.mutex);
-			break;
-		}
-		
-
-		csData.isExec = true;
-		pthread_cond_broadcast(&csLock.cond);
-		pthread_mutex_unlock(&csLock.mutex);
-	}
-
-	return NULL;
 }
 
 void *thr_exec_func(){
@@ -198,6 +173,7 @@ void *thr_exec_func(){
 		inFile.fileName = outFile.fileName = NULL;
 		inFile.filePtr = outFile.filePtr = -1;
 		isBg = false;
+		int cmdCnt = 0;
 		//-----------------------------------------------
 		cl_tokenize(csData.buffer,tokenBuffer,tokens); //parse by lexems (<,>,&,whitespace,else)
 
@@ -218,7 +194,7 @@ void *thr_exec_func(){
 				isBg = true;
 			}
 			else{
-				cmd[i] = tokens[i];
+				cmd[cmdCnt++] = tokens[i];
 			}
 		}
 		
@@ -234,12 +210,44 @@ void *thr_exec_func(){
 	return NULL;
 }
 
+void *thr_read_func(){
+	while(!csData.isExit){
+		pthread_mutex_lock(&csLock.mutex);
+		while(csData.isExec){
+			pthread_cond_wait(&csLock.cond,&csLock.mutex);
+		}
+		csData.isExec = true; //if not exit, then 100% execution
+		//init buffer -----------------------------------
+		for(unsigned int i=0; i<BUF_SIZE; i++){ 
+			csData.buffer[i] = '\0';
+		}
+		//-----------------------------------------------
+		printf("$ "); //prompt
+		fflush(stdout);
+		read(0, csData.buffer, sizeof(csData.buffer));
+		if(csData.buffer[0]=='\0'){ csData.isExit=true;}
+		csData.buffer[strlen(csData.buffer)-1] = '\0'; //remove last char (newline)
+		if(strcmp(csData.buffer,"exit")==0){csData.isExit = true;}
+		
+
+		pthread_cond_broadcast(&csLock.cond);
+		pthread_mutex_unlock(&csLock.mutex);
+	}
+
+	return NULL;
+}
+
+
 int main(){
 	
-	struct sigaction sa;
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = sigchldHandler;
-	sigaction(SIGCHLD, &sa, NULL);
+	struct sigaction sa_chld;
+	memset(&sa_chld, 0, sizeof(sa_chld));
+	sa_chld.sa_handler = sigchldHandler;
+	sigaction(SIGCHLD, &sa_chld, NULL);
+	
+	memset(&sa_int, 0, sizeof(sa_int));
+	sa_int.sa_handler = SIG_IGN;
+	sigaction(SIGINT, &sa_int, NULL);
 
 	pthread_mutex_init(&csLock.mutex,NULL);
 	csData.isExec = false;
